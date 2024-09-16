@@ -50,48 +50,55 @@ device = (
     torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 )  
 
-y = pd.read_csv(os.path.join(project_root, 'data/raw/mimiciv/mortality.csv'))
+y = pd.read_csv(os.path.join(project_root, 'data/raw/mimiciv/mort2.csv'))
 mbp = pd.read_csv(os.path.join(project_root, 'data/raw/mimiciv/mbp.csv'))
 gcs = pd.read_csv(os.path.join(project_root, 'data/raw/mimiciv/gcs_total.csv'))
 glc = pd.read_csv(os.path.join(project_root, 'data/raw/mimiciv/glc.csv'))
 rr = pd.read_csv(os.path.join(project_root, 'data/raw/mimiciv/resprate_mortality.csv'))
 rr = rr.drop(columns=['mortality'])
-X = pd.read_csv(os.path.join(project_root, 'data/raw/mimiciv/hr.csv'))
+hr = pd.read_csv(os.path.join(project_root, 'data/raw/mimiciv/hr.csv'))
 
+#static vars
+# age and gender
+X_static = pd.read_csv(os.path.join(project_root, 'data/raw/mimiciv/static.csv'))
+X_static = X_static[['stay_id', 'age', 'gender']]
 
 # only use intersecting stay_ids
-y = y[y['stay_id'].isin(X['stay_id'])]
-X = X[X['stay_id'].isin(y['stay_id'])]
+y = y[y['stay_id'].isin(hr['stay_id'])]
+hr = hr[hr['stay_id'].isin(y['stay_id'])]
 mbp = mbp[mbp['stay_id'].isin(y['stay_id'])]
 gcs = gcs[gcs['stay_id'].isin(y['stay_id'])]
 rr = rr[rr['stay_id'].isin(y['stay_id'])]
 glc = glc[glc['stay_id'].isin(y['stay_id'])]
+X_static = X_static[X_static['stay_id'].isin(y['stay_id'])]
+
 
 # floor charttime
-X['charttime'] = pd.to_datetime(X['charttime']).dt.floor('H')
+hr['charttime'] = pd.to_datetime(hr['charttime']).dt.floor('H')
 mbp['charttime'] = pd.to_datetime(mbp['charttime']).dt.floor('H')
 gcs['charttime'] = pd.to_datetime(gcs['charttime']).dt.floor('H')
 rr['charttime'] = pd.to_datetime(rr['charttime']).dt.floor('H')
 glc['charttime'] = pd.to_datetime(glc['charttime']).dt.floor('H')
 
 # merge with X
-X = pd.merge(X, mbp, on=['stay_id', 'charttime'], how='left')
-X = pd.merge(X, gcs, on=['stay_id', 'charttime'], how='left')
-X = pd.merge(X, rr, on=['stay_id', 'charttime'], how='left')
-X = pd.merge(X, glc, on=['stay_id', 'charttime'], how='left')
+X = pd.merge(hr, mbp, on=['stay_id', 'charttime'], how='outer')
+X = pd.merge(X, gcs, on=['stay_id', 'charttime'], how='outer')
+X = pd.merge(X, rr, on=['stay_id', 'charttime'], how='outer')
+X = pd.merge(X, glc, on=['stay_id', 'charttime'], how='outer')
 
 
 # only use 50% of the data if preferred 
 y_small = train_test_split(y, test_size=0.9, stratify=y['mortality'])[0]
 X_small = X[X['stay_id'].isin(y_small['stay_id'])]
+X_static_small = X_static[X_static['stay_id'].isin(y_small['stay_id'])]
 print(f'shape y: {y.shape[0]}')
 print(f'shape y_small: {y_small.shape[0]}')
 print(f'shape X: {X.shape[0]}')
 print(f'shape X_small: {X_small.shape[0]}')
 
-
-y_final = y.copy()
-X_final = X.copy()
+y_final = y_small.copy()
+X_final = X_small.copy()
+X_final_static = X_static_small.copy()    
 
 # undersample
 print('before undersampling: ')
@@ -101,10 +108,12 @@ undersampler = RandomUnderSampler(random_state=42, sampling_strategy=0.1)
 y_undersampled_stayids, _ = undersampler.fit_resample(y_final[['stay_id']], y_final['mortality'])
 y_undersampled = y_final[y_final['stay_id'].isin(y_undersampled_stayids['stay_id'])]
 X_undersampled = X_final[X_final['stay_id'].isin(y_undersampled['stay_id'])]
+X_static_undersampled = X_static[X_static['stay_id'].isin(y_undersampled['stay_id'])]
 print('after undersampling: ')
 y_undersampled.mortality.value_counts().plot(kind="bar")
 plt.show()
 #%%
+
 # create time index
 X_undersampled['charttime'] = pd.to_datetime(X['charttime'])
 
@@ -147,11 +156,17 @@ X_timed_imputed = X_timed.copy()
 X_timed_imputed = X_timed_imputed.ffill()
 print('naaaaans')
 print(X_timed_imputed.isna().sum())
-
+# instead of imputing the static vars we drop the (little amount of) rows with missing values
+X_final_static = X_final_static.dropna()
+X_timed_imputed = X_timed_imputed[X_timed_imputed['stay_id'].isin(X_final_static['stay_id'])]
 
 # normalization 
+X_timed_imputed = pd.merge(X_timed_imputed, X_final_static, on='stay_id', how='left')
+X_timed_imputed['gender'] = X_timed_imputed['gender'].map({'M': 0, 'F': 1})
+columns_to_normalize = ['hr_value', 'mbp_value', 'rr_value', 'total_gcs', 'age']
+
 scaler = StandardScaler()
-X_timed_imputed[['hr_value', 'mbp_value', 'rr_value', 'total_gcs']] = scaler.fit_transform(X_timed_imputed[['hr_value', 'mbp_value', 'rr_value',  'total_gcs']])
+X_timed_imputed[columns_to_normalize] = scaler.fit_transform(X_timed_imputed[columns_to_normalize])
 
 
 print(X_timed_imputed.head(10))
@@ -160,28 +175,42 @@ print(X_timed_imputed.describe())
 # %%
 sequences = []
 for stay_id, group in X_timed_imputed.groupby('stay_id'):
-    features = group[['hr_value', 'mbp_value', 'rr_value', 'total_gcs']]
+    time_series = group[['hr_value', 'mbp_value', 'rr_value', 'total_gcs']]
+    static = group[['age', 'gender']].iloc[0]
     label = y_undersampled[y_undersampled['stay_id'] == stay_id].iloc[0].mortality
-    sequences.append((features, label))
+    sequences.append((time_series, static, label))
 
 
-labels = [seq[1] for seq in sequences]    # Labels (mortality)
+labels = [seq[2] for seq in sequences]    # Labels (mortality)
 
 
 train_seq, test_seq = train_test_split(sequences, test_size=0.2, stratify=labels, random_state=42)
 print(len(train_seq), len(test_seq))
+# Check time-series data
+def check_nan_inf_sequences(sequences):
+    for i, (sequence, static_vars, label) in enumerate(sequences):
+        if sequence.isnull().values.any() or np.isinf(sequence.values).any():
+            print(f"NaN or Inf found in sequence data at index {i}, stay_id {sequence['stay_id'].iloc[0]}")
+        if np.isnan(static_vars.values).any() or np.isinf(static_vars.values).any():
+            print(f"NaN or Inf found in static data at index {i}, stay_id {sequence['stay_id'].iloc[0]}")
+        if np.isnan(label) or np.isinf(label):
+            print(f"NaN or Inf found in label at index {i}, stay_id {sequence['stay_id'].iloc[0]}")
+
+check_nan_inf_sequences(train_seq)
+check_nan_inf_sequences(test_seq)
 
 
-plabes_train = [seq[1] for seq in train_seq if seq[1] == 1]
-plabels_test = [seq[1] for seq in test_seq if seq[1] == 1]
+plabes_train = [seq[2] for seq in train_seq if seq[2] == 1]
+plabels_test = [seq[2] for seq in test_seq if seq[2] == 1]
 
 print(f'Positive labels in train: {len(plabes_train)/len(train_seq)}')
 print(f'Positive labels in test: {len(plabels_test)/len(test_seq)}')
 
 #%%
-sequence,label= train_seq[0]
+sequence, static_var,label= train_seq[0]
 print(dict(
             sequence=torch.tensor(sequence.to_numpy(), dtype=torch.float32),
+            static=torch.tensor(static_var.to_numpy(), dtype=torch.float32),
             label=torch.tensor(label).long(),
         ))
 
@@ -196,9 +225,10 @@ class IcuDataset(Dataset):
         return len(self.sequences)
     
     def __getitem__(self, idx):
-        sequence, label = self.sequences[idx]
+        sequence, static_var, label = self.sequences[idx]
         return dict(
             sequence=torch.tensor(sequence.to_numpy(), dtype=torch.float32),
+            #static=torch.tensor(static_var.to_numpy(), dtype=torch.float32),
             label=torch.tensor(label).long(),
         )
 
@@ -215,7 +245,7 @@ class IcuDataModule(pl.LightningDataModule):
         self.test_dataset = IcuDataset(self.test_sequences)
 
     def train_dataloader(self):
-        labels = [seq[1] for seq in self.train_sequences]
+        labels = [seq[2] for seq in self.train_sequences]
         sample_count = np.array([len(np.where(labels == t)[0]) for t in np.unique(labels)])
         weight = 1. / sample_count
         samples_weight = np.array([weight[t] for t in labels])
@@ -249,7 +279,7 @@ data_module = IcuDataModule(train_seq, test_seq, BATCH_SIZE)
 #%%
 # Model
 class IcuModel(nn.Module):
-    def __init__(self, n_features, n_classes, n_hidden=100, n_layers=2):
+    def __init__(self, n_features, n_static_features, n_classes, n_hidden=100, n_layers=2):
         super().__init__()
 
         self.lstm = nn.LSTM(
@@ -258,32 +288,34 @@ class IcuModel(nn.Module):
             num_layers=n_layers,
             batch_first=True,
             dropout=0.75,
-            bidirectional=True        
+            #bidirectional=True        
         )
 
-        #self.classifier = nn.Linear(n_hidden, n_classes)
+        self.classifier = nn.Linear(n_hidden, n_classes)
+        # self.classifier = nn.Linear(n_hidden + n_static_features, n_classes)
         # if bidirectional = True: 
-        self.classifier = nn.Linear(2*n_hidden, n_classes)
+        #self.classifier = nn.Linear(2*n_hidden, n_classes)
 
-    def forward(self, x):
+    def forward(self, x, static_vars):
         self.lstm.flatten_parameters()
         _, (hidden, _) = self.lstm(x)
 
-        #out = hidden[-1]
-        #return self.classifier(out)
+        out = hidden[-1]
+        #combined = torch.cat((out, static_vars), dim=1)
+        return self.classifier(out)
 
         # if bidirectional = True: 
-        hidden_fwd = hidden[-2]
-        hidden_bwd = hidden[-1]
-        out = torch.cat((hidden_fwd, hidden_bwd), dim=1)
-        return self.classifier(out)
+        #hidden_fwd = hidden[-2]
+        #hidden_bwd = hidden[-1]
+        #out = torch.cat((hidden_fwd, hidden_bwd), dim=1)
+        #return self.classifier(out)
     
 
 # pl lightning wrapper
 class MortalityPredictor(pl.LightningModule):
-    def __init__(self, n_features: int, n_classes = 2):
+    def __init__(self, n_features: int, n_static_features: int, n_classes = 2):
         super().__init__()
-        self.model = IcuModel(n_features, n_classes)
+        self.model = IcuModel(n_features, n_static_features, n_classes)
         class_weights = torch.tensor([1.0, 3.0]) 
         self.criterion = nn.CrossEntropyLoss(weight=class_weights)
 
@@ -291,8 +323,8 @@ class MortalityPredictor(pl.LightningModule):
         #self.criterion = nn.CrossEntropyLoss()
         self.n_classes = 2
 
-    def forward(self, x, labels=None):
-        output = self.model(x)
+    def forward(self, sequences, static_vars, labels=None):
+        output = self.model(sequences, static_vars)
         loss = 0
         if labels is not None:
             loss = self.criterion(output, labels)
@@ -300,11 +332,13 @@ class MortalityPredictor(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         sequences = batch['sequence']
+        #static_vars = batch['static']
         labels = batch['label']
         #print(f"Batch {batch_idx} labels: {labels.tolist()}")
 
 
         loss, outputs = self(sequences, labels)
+        #loss, outputs = self(sequences, static_vars, labels)
         probabilities = torch.softmax(outputs, dim=1)[:, 1]
         step_auroc = auroc(probabilities, labels, task='binary')
         self.log('train_loss', loss, prog_bar=True, logger=True)
@@ -313,8 +347,10 @@ class MortalityPredictor(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         sequences = batch['sequence']
+       # static_vars = batch['static']
         labels = batch['label']
         loss, outputs = self(sequences, labels)
+        #loss, outputs = self(sequences, static_vars, labels)
         probabilities = torch.softmax(outputs, dim=1)[:, 1]
         step_auroc = auroc(probabilities, labels, task='binary')
         
@@ -324,8 +360,10 @@ class MortalityPredictor(pl.LightningModule):
     
     def test_step(self, batch, batch_idx):
         sequences = batch['sequence']
-        labels = batch['label']
+        #static_vars = batch['static']
+        labels = batch['label'] 
         loss, outputs = self(sequences, labels)
+        #loss, outputs = self(sequences, static_vars, labels)
         probabilities = torch.softmax(outputs, dim=1)[:, 1]
         step_auroc = auroc(probabilities, labels, task='binary')
         
@@ -344,6 +382,7 @@ class MortalityPredictor(pl.LightningModule):
 
 model = MortalityPredictor(
     n_features=4, 
+    n_static_features=2,
     n_classes=2,
     )
 

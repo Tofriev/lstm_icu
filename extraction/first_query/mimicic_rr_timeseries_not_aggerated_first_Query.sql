@@ -13,32 +13,49 @@ WITH resprate AS (
     AND ce.valuenum <= 50
     AND ce.valuenum >= 5
 ), 
-mort AS ( 
-  SELECT
-    ic.subject_id,
-    ic.stay_id,
-    ic.hadm_id,
-    CASE
-      WHEN adm.deathtime BETWEEN datetime(ic.intime, '+24 hours') AND datetime(ic.intime, '+48 hours') THEN 1
-      WHEN adm.dischtime BETWEEN datetime(ic.intime, '+24 hours') AND datetime(ic.intime, '+48 hours') AND adm.discharge_location = 'DIED' THEN 1 
-      ELSE 0
-    END AS Mortality_next24h    
-  FROM icustays ic
-  INNER JOIN admissions adm ON ic.hadm_id = adm.hadm_id
-  WHERE
-    -- patients have >= 48h of data or died in the second 24h (not the first 24h)
-    (
-      (strftime('%s', ic.outtime) - strftime('%s', ic.intime)) >= 172800
-      OR adm.deathtime BETWEEN datetime(ic.intime, '+24 hours') AND datetime(ic.intime, '+48 hours')
-    )
-    AND NOT EXISTS (
-      SELECT 1
-      FROM admissions adm2
-      WHERE adm2.hadm_id = ic.hadm_id
-      AND adm2.deathtime BETWEEN ic.intime AND datetime(ic.intime, '+24 hours')
-    )
-
+mort AS ( -- death during icu stay
+    SELECT
+        ic.subject_id,
+        ic.stay_id,
+        ic.hadm_id,
+        CASE
+          WHEN (
+            (dm.deathtime BETWEEN ic.intime AND ic.outtime AND adm.deathtime >= datetime(ic.intime, '+25 hours'))
+            OR
+            (adm.dischtime <= ic.outtime AND adm.discharge_location = 'DIED' AND adm.deathtime BETWEEN ic.intime AND ic.outtime AND adm.deathtime >= datetime(ic.intime, '+25 hours'))
+          ) THEN 1
+            ELSE 0
+        END AS Mortality_icu    
+    FROM icustays ic
+    INNER JOIN admissions adm ON ic.hadm_id = adm.hadm_id
 )
+-- olod target: death during 24h after recordings 
+--mort AS ( 
+--  SELECT
+--    ic.subject_id,
+--    ic.stay_id,
+--    ic.hadm_id,
+--   CASE
+--      WHEN adm.deathtime BETWEEN datetime(ic.intime, '+24 hours') AND datetime(ic.intime, '+48 hours') THEN 1
+--      WHEN adm.dischtime BETWEEN datetime(ic.intime, '+24 hours') AND datetime(ic.intime, '+48 hours') AND adm.discharge_location = 'DIED' THEN 1 
+--      ELSE 0
+--    END AS Mortality_next24h    
+--  FROM icustays ic
+--  INNER JOIN admissions adm ON ic.hadm_id = adm.hadm_id
+--  WHERE
+--    -- patients have >= 48h of data or died in the second 24h (not the first 24h)
+--    (
+--      (strftime('%s', ic.outtime) - strftime('%s', ic.intime)) >= 172800
+--      OR adm.deathtime BETWEEN datetime(ic.intime, '+24 hours') AND datetime(ic.intime, '+48 hours')
+--    )
+--    AND NOT EXISTS (
+--      SELECT 1
+--      FROM admissions adm2
+--     WHERE adm2.hadm_id = ic.hadm_id
+--      AND adm2.deathtime BETWEEN ic.intime AND datetime(ic.intime, '+24 hours')
+--    )
+--
+--)
 
 SELECT
   m.Mortality_next24h AS mortality,
